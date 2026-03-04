@@ -97,6 +97,68 @@ if (!(runner instanceof BetaToolRunner)) {
     }
   }, 30_000);
 
+  it("resolves accessor-style re-exports from nested modules", async () => {
+    const pkgDir = await mkdtemp(join(tmpdir(), "needle-verify-pkg-"));
+
+    try {
+      await writeFile(
+        join(pkgDir, "package.json"),
+        JSON.stringify(
+          {
+            name: "needle-verify-reexport",
+            version: "1.0.0",
+            type: "module",
+            exports: {
+              ".": "./index.js",
+              "./resources/beta/messages/messages.mjs":
+                "./resources/beta/messages/messages.mjs",
+              "./resources/beta/messages/tools.mjs":
+                "./resources/beta/messages/tools.mjs",
+            },
+          },
+          null,
+          2,
+        ),
+      );
+
+      await writeFile(join(pkgDir, "index.js"), `export const version = "1.0.0";\n`);
+      await mkdir(join(pkgDir, "resources", "beta", "messages"), {
+        recursive: true,
+      });
+      await writeFile(
+        join(pkgDir, "resources", "beta", "messages", "tools.mjs"),
+        `export const weatherTool = { name: "weather" };
+`,
+      );
+      await writeFile(
+        join(pkgDir, "resources", "beta", "messages", "messages.mjs"),
+        `export default class BetaToolRunner {
+  constructor(client, opts) {
+    this.client = client;
+    this.opts = opts;
+  }
+}
+
+export { weatherTool } from "./tools.mjs";
+`,
+      );
+
+      const snippet = `const runner = new BetaToolRunner(null, {
+  tools: [weatherTool],
+});
+if (!runner || runner.opts.tools[0].name !== "weather") {
+  throw new Error("missing tool");
+}
+`;
+
+      const result = await verifySnippet(pkgDir, snippet);
+      expect(result.success).toBe(true);
+      expect(result.mode).toBe("resolved");
+    } finally {
+      await rm(pkgDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   it("detects non-JavaScript snippets and fails with a clear message", async () => {
     const pkgDir = await mkdtemp(join(tmpdir(), "needle-verify-pkg-"));
 
@@ -196,6 +258,45 @@ if (!runner) {
       const result = await verifySnippet(pkgDir, snippet);
       expect(result.success).toBe(true);
       expect(result.mode).toBe("assisted");
+    } finally {
+      await rm(pkgDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("repairs TypeScript-style annotations before running JavaScript verification", async () => {
+    const pkgDir = await mkdtemp(join(tmpdir(), "needle-verify-pkg-"));
+
+    try {
+      await writeFile(
+        join(pkgDir, "package.json"),
+        JSON.stringify(
+          {
+            name: "needle-verify-ts-annotations",
+            version: "1.0.0",
+            type: "module",
+            exports: "./index.js",
+          },
+          null,
+          2,
+        ),
+      );
+      await writeFile(join(pkgDir, "index.js"), `export const ok = true;\n`);
+
+      const snippet = `const weather = {
+  run: async (input: { location: string }): Promise<string> => {
+    return input.location;
+  },
+};
+
+const out = await weather.run({ location: "NYC" });
+if (out !== "NYC") {
+  throw new Error("weather tool failed");
+}
+`;
+
+      const result = await verifySnippet(pkgDir, snippet);
+      expect(result.success).toBe(true);
+      expect(result.mode).toBe("direct");
     } finally {
       await rm(pkgDir, { recursive: true, force: true });
     }

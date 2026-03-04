@@ -1,0 +1,11 @@
+{
+  "name": "knot-machine",
+  "version": "0.0.1",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js",
+    "./runtime": "./src/runtime.js",
+    "./ops": "./src/ops.js",
+    "./wire": "./src/wire.js"
+  }
+}

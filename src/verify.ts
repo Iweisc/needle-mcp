@@ -130,6 +130,37 @@ function repairMissingObjectLiteral(snippet: string): string | null {
   return repaired === snippet ? null : repaired;
 }
 
+/**
+ * Repair common TypeScript-only syntax so snippets can run as plain JavaScript.
+ * Focuses on lightweight annotation stripping for params/returns/variables.
+ */
+function repairTypeScriptAnnotations(snippet: string): string | null {
+  let repaired = snippet;
+
+  // Arrow/function param annotations, including object-literal types:
+  // `(input: { location: string })` -> `(input)`.
+  repaired = repaired.replace(
+    /([,(]\s*(?:\.\.\.)?[A-Za-z_$][\w$]*\??)\s*:\s*(\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}|[A-Za-z_$][\w$<>,.\s\[\]\|&?]*)(?=\s*(?:[=,)]))/g,
+    "$1",
+  );
+
+  // Return type annotations before arrow functions:
+  // `(input): Promise<string> =>` -> `(input) =>`.
+  repaired = repaired.replace(
+    /(\)\s*):\s*[A-Za-z_$][\w$<>,.\s\[\]\|&?]*(\s*=>)/g,
+    "$1$2",
+  );
+
+  // Variable declaration annotations:
+  // `const x: Foo =` -> `const x =`.
+  repaired = repaired.replace(
+    /\b(const|let|var)\s+([A-Za-z_$][\w$]*)\s*:\s*[A-Za-z_$][\w$<>,.\s\[\]\|&?]*(\s*=)/g,
+    "$1 $2$3",
+  );
+
+  return repaired === snippet ? null : repaired;
+}
+
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -258,10 +289,14 @@ function expose(target) {
   if (!target || (typeof target !== "object" && typeof target !== "function")) return;
   for (const key of Object.getOwnPropertyNames(target)) {
     if (key === "default" || key in globalThis) continue;
-    const descriptor = Object.getOwnPropertyDescriptor(target, key);
-    if (!descriptor || !("value" in descriptor)) continue;
+    let value;
+    try {
+      value = Reflect.get(target, key);
+    } catch {
+      continue;
+    }
     Object.defineProperty(globalThis, key, {
-      value: descriptor.value,
+      value,
       configurable: true,
       writable: true,
     });
@@ -290,6 +325,64 @@ function exposeModule(mod) {
   }
 }
 
+// Auto-instantiate: for PascalCase constructors, expose a camelCase instance.
+// Covers the common pattern where snippets use e.g. "anthropic" as an instance of "Anthropic".
+function autoInstantiate() {
+  const noopHandler = {
+    get(_, prop) {
+      if (prop === Symbol.toPrimitive) return () => "";
+      if (prop === "then") return undefined; // not thenable
+      return new Proxy(function(){}, noopHandler);
+    },
+    apply() { return new Proxy(function(){}, noopHandler); },
+  };
+
+  function tryInstantiate(Ctor) {
+    try {
+      return new Ctor();
+    } catch {
+      return new Proxy(function(){}, noopHandler);
+    }
+  }
+
+  function defineIfMissing(name, value) {
+    if (name in globalThis) return;
+    Object.defineProperty(globalThis, name, {
+      value,
+      configurable: true,
+      writable: true,
+    });
+  }
+
+  // Find the primary constructor: default export if it's a function, otherwise
+  // the first PascalCase constructor found on globalThis.
+  let primaryCtor = null;
+  if ("defaultExport" in globalThis && typeof globalThis.defaultExport === "function") {
+    primaryCtor = globalThis.defaultExport;
+  }
+
+  const keys = Object.getOwnPropertyNames(globalThis);
+  for (const key of keys) {
+    if (!/^[A-Z][a-zA-Z0-9]*$/.test(key)) continue;
+    const Ctor = globalThis[key];
+    if (typeof Ctor !== "function") continue;
+    if (!primaryCtor) primaryCtor = Ctor;
+
+    // Expose camelCase instance (e.g. Anthropic → anthropic)
+    const camel = key[0].toLowerCase() + key.slice(1);
+    defineIfMissing(camel, tryInstantiate(Ctor));
+  }
+
+  // Expose generic aliases as deep no-op Proxies so snippets using
+  // "client", "sdk", "api", or "app" can traverse any property chain.
+  if (primaryCtor) {
+    const proxy = new Proxy(function(){}, noopHandler);
+    for (const alias of ["client", "sdk", "api", "app"]) {
+      defineIfMissing(alias, proxy);
+    }
+  }
+}
+
 exposeModule(pkg);
 for (const modUrl of extraModules) {
   try {
@@ -297,6 +390,7 @@ for (const modUrl of extraModules) {
     exposeModule(mod);
   } catch {}
 }
+autoInstantiate();
 
 await import("./snippet.mjs");
 `;
@@ -380,6 +474,17 @@ export async function verifySnippet(
           return direct;
         }
       }
+
+      const tsRepaired = repairTypeScriptAnnotations(snippetSource);
+      if (tsRepaired && tsRepaired !== snippetSource) {
+        logger.info("Verify: retrying snippet after TypeScript annotation repair");
+        snippetSource = tsRepaired;
+        await writeFile(join(dir, "snippet.mjs"), snippetSource);
+        direct = await runScript(dir, "snippet.mjs");
+        if (direct.success) {
+          return direct;
+        }
+      }
     }
 
     const directMissing = extractMissingIdentifiers(direct.stderr);
@@ -398,34 +503,54 @@ export async function verifySnippet(
       return assisted;
     }
 
-    const unresolved = [...new Set([
+    let unresolved = [...new Set([
       ...directMissing,
       ...extractMissingIdentifiers(assisted.stderr),
     ])];
 
-    if (unresolved.length > 0) {
-      const extraModules = await findSymbolModuleUrls(dir, importSpec, unresolved);
-      if (extraModules.length > 0) {
-        logger.info("Verify: retrying snippet with symbol-resolved import harness", {
-          symbols: unresolved.slice(0, 8),
-          modules: extraModules.length,
-        });
-        await writeFile(
-          join(dir, "test.mjs"),
-          buildAssistedHarness(importSpec, extraModules),
-        );
-        const resolved = await runScript(dir, "test.mjs");
-        resolved.mode = "resolved";
-        if (resolved.success) {
-          resolved.stderr = direct.stderr;
-          return resolved;
-        }
-        resolved.stderr =
-          `Direct run failed:\n${direct.stderr}\n\n` +
-          `Assisted run failed:\n${assisted.stderr}\n\n` +
-          `Resolved run failed:\n${resolved.stderr}`;
+    const allExtraModules: string[] = [];
+    const MAX_RESOLVE_PASSES = 3;
+    let lastResolved: VerifyResult | null = null;
+
+    for (let pass = 0; pass < MAX_RESOLVE_PASSES && unresolved.length > 0; pass++) {
+      const newModules = await findSymbolModuleUrls(dir, importSpec, unresolved);
+      for (const m of newModules) {
+        if (!allExtraModules.includes(m)) allExtraModules.push(m);
+      }
+
+      if (allExtraModules.length === 0) break;
+
+      logger.info("Verify: retrying snippet with symbol-resolved import harness", {
+        pass: pass + 1,
+        symbols: unresolved.slice(0, 8),
+        modules: allExtraModules.length,
+      });
+      await writeFile(
+        join(dir, "test.mjs"),
+        buildAssistedHarness(importSpec, allExtraModules),
+      );
+      const resolved = await runScript(dir, "test.mjs");
+      resolved.mode = "resolved";
+      lastResolved = resolved;
+
+      if (resolved.success) {
+        resolved.stderr = direct.stderr;
         return resolved;
       }
+
+      const newMissing = extractMissingIdentifiers(resolved.stderr);
+      const brandNew = newMissing.filter((s) => !unresolved.includes(s));
+      if (brandNew.length === 0) break;
+
+      unresolved = [...new Set([...unresolved, ...brandNew])];
+    }
+
+    if (lastResolved) {
+      lastResolved.stderr =
+        `Direct run failed:\n${direct.stderr}\n\n` +
+        `Assisted run failed:\n${assisted.stderr}\n\n` +
+        `Resolved run failed:\n${lastResolved.stderr}`;
+      return lastResolved;
     }
 
     assisted.stderr =

@@ -93,6 +93,7 @@ export async function runNeedlePipeline(
       filteredEvidence,
       webEvidence,
       deepReads,
+      resolved.dir,
     );
     rl?.emit("synthesis.completed", {
       confidence: output.confidence,

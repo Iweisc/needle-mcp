@@ -19,7 +19,7 @@
   --font-mono:'JetBrains Mono',ui-monospace,'Cascadia Code',monospace;
 }
 html{font-size:13px;background:var(--bg-0);color:var(--fg-1);font-family:var(--font-ui)}
-body{height:100vh;overflow:hidden;display:grid;grid-template-columns:280px 1fr 340px;grid-template-rows:40px 1fr 260px;gap:1px;background:var(--border)}
+body{height:100vh;overflow:hidden;display:grid;grid-template-columns:280px 1fr 340px;grid-template-rows:40px 1fr 400px;gap:1px;background:var(--border)}
 body>*{background:var(--bg-1)}
 
 /* ── Header bar ─────────────────────────────────────────────────────────── */
@@ -204,7 +204,7 @@ body>*{background:var(--bg-1)}
   </div>
   <div class="form-group">
     <label>Spec</label>
-    <input type="text" id="res-spec" placeholder="e.g. rou3, ./path, git url">
+    <input type="text" id="res-spec" placeholder="e.g. ./demo-resources/quiet-router, ./path, git url">
   </div>
   <div class="form-group">
     <label>Question</label>
@@ -218,17 +218,21 @@ body>*{background:var(--bg-1)}
 
   <div class="section-label" style="margin-top:8px">Demo Presets</div>
   <div class="presets">
-    <button class="preset-btn" data-type="npm" data-spec="rou3" data-q="How does rou3 match routes with path parameters and wildcards? Show the matching algorithm.">
-      <span class="preset-name">rou3</span>
-      <span class="preset-q">Route matching algorithm</span>
+    <button class="preset-btn" data-type="local" data-spec="./demo-resources/knot-machine" data-q="Hard mode: explain how parseProgram(), buildPlan() SCC ranking, and executePlan() loop_guard interact. Include how op results can override next hops and how bytecode checksum is validated.">
+      <span class="preset-name">knot-machine (hard mode)</span>
+      <span class="preset-q">Parser + SCC planner + guarded runtime + bytecode wire format</span>
     </button>
-    <button class="preset-btn" data-type="npm" data-spec="@anthropic-ai/sdk" data-q="How do I stream a chat completion response? Show the streaming API with tool use.">
-      <span class="preset-name">@anthropic-ai/sdk</span>
-      <span class="preset-q">Streaming chat + tool use</span>
+    <button class="preset-btn" data-type="local" data-spec="./demo-resources/quiet-router" data-q="How do tokenizePattern() and selectRoute() resolve static segments, :params, and ** wildcards? Show a usage example.">
+      <span class="preset-name">quiet-router (local)</span>
+      <span class="preset-q">Route tokenization + best-match selection</span>
     </button>
-    <button class="preset-btn" data-type="npm" data-spec="zod" data-q="How does z.object().parse() validate nested objects? Show the internal validation pipeline.">
-      <span class="preset-name">zod</span>
-      <span class="preset-q">Object validation internals</span>
+    <button class="preset-btn" data-type="local" data-spec="./demo-resources/pulse-cache" data-q="How does PulseCache handle TTL + jitter, and what does remember() return on cache hit vs miss?">
+      <span class="preset-name">pulse-cache (local)</span>
+      <span class="preset-q">TTL cache behavior + remember flow</span>
+    </button>
+    <button class="preset-btn" data-type="local" data-spec="./demo-resources/framepack" data-q="How do encodeFrame() and decodeFrame() lay out headers, payload bytes, and checksum validation?">
+      <span class="preset-name">framepack (local)</span>
+      <span class="preset-q">Binary frame encoding + checksum validation</span>
     </button>
   </div>
 </div>

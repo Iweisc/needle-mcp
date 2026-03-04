@@ -46,6 +46,32 @@ If fewer than 5 code hits (`.ts`, `.js`, `.d.ts`, etc.) exist in the top results
 
 Synthesis responses are validated through a Zod schema. If the LLM returns invalid JSON, needle automatically retries once before falling back.
 
+### Citation Integrity Guard
+
+Needle now validates model-provided citations against the actual resource files before accepting synthesis output:
+
+- Citation paths must resolve inside the target resource (no out-of-root paths).
+- Citation line ranges must parse and be in-bounds for the target file.
+- If all citations are invalid, synthesis fails safely with confidence `0`.
+- If only some citations are invalid, invalid citations are dropped and confidence is downgraded.
+
+This prevents high-confidence answers with fabricated or impossible line references.
+
+### Snippet Verification Engine (Optional)
+
+When `options.verify=true` and the resource is npm-based, Needle executes generated snippets in a sandboxed temp project:
+
+1. **Direct mode**: runs snippet as-is.
+2. **Assisted mode**: auto-imports package exports when snippets omit imports.
+3. **Resolved mode**: resolves missing symbols from nested package modules across multiple passes.
+
+Verifier robustness includes:
+
+- Non-JS snippet detection (CLI commands, Python snippets) with explicit skip reasons.
+- Syntax repair for missing object-literal braces in malformed calls.
+- TypeScript annotation stripping for JS runtime compatibility (e.g. inline param/return annotations in `.mjs` snippets).
+- Symbol exposure for accessor/re-export patterns (not only direct value descriptors).
+
 ## Prerequisites
 
 - Node.js 20+
@@ -75,9 +101,22 @@ Open **http://127.0.0.1:4242/** in your browser to:
 - Watch the pipeline execute in real-time (SSE-powered timeline)
 - Browse evidence (top hits, deep-read files, web sources)
 - View the final answer, code, citations, and confidence score
-- Use **demo presets** (rou3, @anthropic-ai/sdk, zod) to quickly demonstrate the pipeline
+- Use **demo presets** backed by bundled, undocumented local libs (`knot-machine` hard mode, `quiet-router`, `pulse-cache`, `framepack`) for realistic no-doc demos
 
 The dashboard binds to `127.0.0.1` only (no auth needed). Set `NEEDLE_DASHBOARD_PORT` to change the port.
+
+Preset sources live under `./demo-resources/*` and intentionally do not include docs.
+
+### Hard-Mode Demo Resource
+
+`./demo-resources/knot-machine` is a deliberately difficult local target for stress-testing code-grounded reasoning:
+
+- Multi-file architecture (`parse`, `plan`, `runtime`, `ops`, `wire`).
+- SCC/Tarjan-based control-flow analysis and component ranking.
+- Runtime loop guards and dynamic operation dispatch.
+- Bytecode envelope encoding/decoding with checksum validation.
+
+The demo resource sources are minified to simulate poor readability conditions common in undocumented libraries.
 
 ## Environment Variables
 
@@ -128,6 +167,25 @@ The server exposes a single tool `needle.ask`. Example invocation:
   "options": {
     "language": "ts",
     "maxHits": 30,
+    "enableWeb": false,
+    "verify": false
+  }
+}
+```
+
+Local hard-mode example:
+
+```json
+{
+  "resource": {
+    "type": "local",
+    "spec": "./demo-resources/knot-machine"
+  },
+  "question": "Explain how parseProgram(), buildPlan() SCC ranking, executePlan() loop_guard, and bytecode checksum validation interact.",
+  "options": {
+    "language": "js",
+    "maxHits": 80,
+    "contextLines": 4,
     "enableWeb": false,
     "verify": false
   }
