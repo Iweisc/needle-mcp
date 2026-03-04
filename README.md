@@ -102,6 +102,7 @@ Open **http://127.0.0.1:4242/** in your browser to:
 - Browse evidence (top hits, deep-read files, web sources)
 - View the final answer, code, citations, and confidence score
 - Use **demo presets** backed by bundled, undocumented local libs (`knot-machine` hard mode, `quiet-router`, `pulse-cache`, `framepack`) for realistic no-doc demos
+- Use a **judge/control preset** (`@anthropic-ai/sdk@0.78.0`) to verify grounded answers on a mainstream documented package
 
 The dashboard binds to `127.0.0.1` only (no auth needed). Set `NEEDLE_DASHBOARD_PORT` to change the port.
 

@@ -301,4 +301,16 @@ if (out !== "NYC") {
       await rm(pkgDir, { recursive: true, force: true });
     }
   }, 30_000);
+
+  it("verifies a mainstream SDK snippet via assisted imports (@anthropic-ai/sdk)", async () => {
+    const snippet = `const client = new Anthropic({ apiKey: "test-key" });
+if (!client || typeof client.messages?.stream !== "function") {
+  throw new Error("messages.stream API missing");
+}
+`;
+
+    const result = await verifySnippet("@anthropic-ai/sdk@0.78.0", snippet);
+    expect(result.success).toBe(true);
+    expect(["assisted", "resolved"]).toContain(result.mode);
+  }, 120_000);
 });

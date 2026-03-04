@@ -218,6 +218,10 @@ body>*{background:var(--bg-1)}
 
   <div class="section-label" style="margin-top:8px">Demo Presets</div>
   <div class="presets">
+    <button class="preset-btn" data-type="npm" data-spec="@anthropic-ai/sdk@0.78.0" data-q="Judge mode: show exactly how Anthropic client streaming works in this version. Include tool-use related stream APIs and cite source lines for each claim.">
+      <span class="preset-name">@anthropic-ai/sdk (judge)</span>
+      <span class="preset-q">Mainstream control: streaming + tool APIs</span>
+    </button>
     <button class="preset-btn" data-type="local" data-spec="./demo-resources/knot-machine" data-q="Hard mode: explain how parseProgram(), buildPlan() SCC ranking, and executePlan() loop_guard interact. Include how op results can override next hops and how bytecode checksum is validated.">
       <span class="preset-name">knot-machine (hard mode)</span>
       <span class="preset-q">Parser + SCC planner + guarded runtime + bytecode wire format</span>
