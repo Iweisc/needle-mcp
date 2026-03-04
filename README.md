@@ -61,13 +61,32 @@ pnpm build
 NEEDLE_BEDROCK_BEARER_TOKEN=your-token pnpm start
 ```
 
+## Dashboard
+
+Needle MCP includes a local web dashboard for demos and debugging. When you run `pnpm start`, the dashboard starts automatically alongside the MCP stdio server.
+
+```
+Dashboard listening on 127.0.0.1:4242
+```
+
+Open **http://127.0.0.1:4242/** in your browser to:
+
+- Run `needle.ask` queries through a web form
+- Watch the pipeline execute in real-time (SSE-powered timeline)
+- Browse evidence (top hits, deep-read files, web sources)
+- View the final answer, code, citations, and confidence score
+- Use **demo presets** (rou3, @anthropic-ai/sdk, zod) to quickly demonstrate the pipeline
+
+The dashboard binds to `127.0.0.1` only (no auth needed). Set `NEEDLE_DASHBOARD_PORT` to change the port.
+
 ## Environment Variables
 
 | Variable | Required | Default | Purpose |
 |----------|----------|---------|---------|
 | `NEEDLE_BEDROCK_BEARER_TOKEN` | Yes | — | Bearer token for Bedrock API auth |
 | `NEEDLE_AWS_REGION` | No | `us-east-1` | AWS region for Bedrock endpoint |
-| `NEEDLE_SEARXNG_URL` | No | `http://localhost:8889/search` | SearXNG instance URL for web evidence |
+| `NEEDLE_SEARXNG_URL` | No | `http://localhost:8889/search` | Preferred SearXNG URL for web evidence (comma-separated list supported); falls back to Brave search HTML parsing when unavailable |
+| `NEEDLE_DASHBOARD_PORT` | No | `4242` | Port for the web dashboard |
 
 ## MCP Client Configuration
 
