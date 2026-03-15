@@ -114,4 +114,23 @@ describe("runIterativePipeline", () => {
     // Should have evidence from both passes
     expect(result.allEvidence.length).toBeGreaterThanOrEqual(2);
   });
+
+  it("emits iterative sub-step events for dashboard timeline", async () => {
+    const steps: string[] = [];
+
+    await runIterativePipeline("test question", "/tmp/test", {
+      evidenceOptions: {},
+      enableIteration: false,
+      enableImportFollowing: false,
+      onStep: (step) => steps.push(step),
+    });
+
+    expect(steps).toEqual(expect.arrayContaining([
+      "evidence.reranked",
+      "deepread.completed",
+      "imports.followed",
+      "gaps.identified",
+      "iteration.pass2.completed",
+    ]));
+  });
 });

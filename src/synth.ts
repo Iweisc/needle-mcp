@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { readFile } from "node:fs/promises";
+import { isAbsolute, relative, resolve } from "node:path";
 import type {
   EvidenceHit,
   WebEvidence,
@@ -102,6 +104,336 @@ function truncate(s: string, maxLen: number): string {
   return s.length <= maxLen ? s : s.slice(0, maxLen - 1) + "…";
 }
 
+function countLines(content: string): number {
+  return content.split(/\r?\n/).length;
+}
+
+interface FileCitationStats {
+  lineCount: number;
+  likelyMinified: boolean;
+}
+
+function isLikelyMinifiedContent(content: string): boolean {
+  const lines = content.split(/\r?\n/);
+  if (lines.length > 2) return false;
+  const longestLine = lines.reduce((max, line) => Math.max(max, line.length), 0);
+  const punctuationDensity = (content.match(/[{}();,]/g)?.length ?? 0);
+  return longestLine > 320 || (content.length > 600 && punctuationDensity > 50);
+}
+
+function normalizeCitationPath(file: string): string {
+  const trimmed = file.trim().replace(/\\/g, "/");
+  if (!trimmed) return "";
+  const withoutFileScheme = trimmed.replace(/^file:(\/\/)?/i, "");
+  return withoutFileScheme.replace(/^\.\//, "");
+}
+
+function pathBasename(path: string): string {
+  const normalized = path.replace(/\\/g, "/");
+  const idx = normalized.lastIndexOf("/");
+  return idx >= 0 ? normalized.slice(idx + 1) : normalized;
+}
+
+function pathEndsWithSegment(path: string, suffix: string): boolean {
+  const normalizedPath = normalizeCitationPath(path).replace(/^\/+/, "");
+  const normalizedSuffix = normalizeCitationPath(suffix).replace(/^\/+/, "");
+  if (!normalizedPath || !normalizedSuffix) return false;
+  return normalizedPath === normalizedSuffix || normalizedPath.endsWith(`/${normalizedSuffix}`);
+}
+
+function pushUnique(target: string[], seen: Set<string>, value: string): void {
+  if (!value || seen.has(value)) return;
+  seen.add(value);
+  target.push(value);
+}
+
+function collectCitationPathCandidates(
+  file: string,
+  root: string | null,
+): { relative: string[]; absolute: string[] } {
+  const normalized = normalizeCitationPath(file);
+  const relativeCandidates: string[] = [];
+  const absoluteCandidates: string[] = [];
+  const seenRelative = new Set<string>();
+  const seenAbsolute = new Set<string>();
+
+  const addRelative = (value: string): void => {
+    const cleaned = normalizeCitationPath(value).replace(/^\/+/, "");
+    pushUnique(relativeCandidates, seenRelative, cleaned);
+  };
+  const addAbsolute = (value: string): void => {
+    const cleaned = resolve(value);
+    pushUnique(absoluteCandidates, seenAbsolute, cleaned);
+  };
+
+  if (!normalized) {
+    return { relative: relativeCandidates, absolute: absoluteCandidates };
+  }
+
+  if (isAbsolute(normalized)) {
+    addAbsolute(normalized);
+    addRelative(normalized);
+    if (root) {
+      const absPath = resolve(normalized);
+      if (isWithinRoot(root, absPath)) {
+        addRelative(relative(root, absPath));
+      }
+    }
+    return { relative: relativeCandidates, absolute: absoluteCandidates };
+  }
+
+  addRelative(normalized);
+  if (root) {
+    const rootBase = pathBasename(root);
+    if (rootBase && normalized.startsWith(`${rootBase}/`)) {
+      addRelative(normalized.slice(rootBase.length + 1));
+    }
+  }
+
+  return { relative: relativeCandidates, absolute: absoluteCandidates };
+}
+
+function resolveFromDeepReads(
+  candidates: readonly string[],
+  deepReadPaths: readonly string[],
+): string | null {
+  const directMatch = candidates.find((candidate) =>
+    deepReadPaths.includes(candidate)
+  );
+  if (directMatch) return directMatch;
+
+  const suffixMatches = new Set<string>();
+  for (const deepPath of deepReadPaths) {
+    for (const candidate of candidates) {
+      if (pathEndsWithSegment(deepPath, candidate)) {
+        suffixMatches.add(deepPath);
+        break;
+      }
+    }
+  }
+  if (suffixMatches.size === 1) {
+    return [...suffixMatches][0];
+  }
+
+  const basenames = [...new Set(candidates.map(pathBasename).filter(Boolean))];
+  for (const base of basenames) {
+    const matches = deepReadPaths.filter((p) => pathBasename(p) === base);
+    if (matches.length === 1) return matches[0];
+  }
+
+  return null;
+}
+
+function parseCitationLines(lines: string): { start: number; end: number } | null {
+  const match = lines.trim().match(/^L?(\d+)(?:\s*-\s*L?(\d+))?$/i);
+  if (!match) return null;
+  const start = Number(match[1]);
+  const end = Number(match[2] ?? match[1]);
+  if (!Number.isInteger(start) || !Number.isInteger(end)) return null;
+  if (start <= 0 || end < start) return null;
+  return { start, end };
+}
+
+function isWithinRoot(root: string, absPath: string): boolean {
+  const rel = relative(root, absPath);
+  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+}
+
+interface CitationIssue {
+  file: string;
+  lines: string;
+  reason: string;
+}
+
+interface CitationValidationResult {
+  valid: NeedleAskOutput["citations"];
+  invalid: CitationIssue[];
+}
+
+async function validateCitations(
+  citations: SynthesisResponse["citations"],
+  deepReads: DeepReadFile[],
+  resourceDir?: string,
+): Promise<CitationValidationResult> {
+  const valid: NeedleAskOutput["citations"] = [];
+  const invalid: CitationIssue[] = [];
+
+  const deepReadStats = new Map<string, FileCitationStats>();
+  for (const f of deepReads) {
+    deepReadStats.set(normalizeCitationPath(f.path), {
+      lineCount: countLines(f.content),
+      likelyMinified: isLikelyMinifiedContent(f.content),
+    });
+  }
+
+  const fileStatsCache = new Map<string, FileCitationStats | null>();
+  const root = resourceDir ? resolve(resourceDir) : null;
+  const deepReadPaths = [...deepReadStats.keys()];
+
+  async function readStatsForAbsolutePath(
+    absPath: string,
+  ): Promise<FileCitationStats | null> {
+    if (fileStatsCache.has(absPath)) {
+      return fileStatsCache.get(absPath) ?? null;
+    }
+
+    try {
+      const content = await readFile(absPath, "utf-8");
+      const stats: FileCitationStats = {
+        lineCount: countLines(content),
+        likelyMinified: isLikelyMinifiedContent(content),
+      };
+      fileStatsCache.set(absPath, stats);
+      return stats;
+    } catch {
+      fileStatsCache.set(absPath, null);
+      return null;
+    }
+  }
+
+  async function getFileStats(
+    file: string,
+  ): Promise<{ canonicalPath: string; stats: FileCitationStats } | null> {
+    const candidates = collectCitationPathCandidates(file, root);
+    const deepReadPath = resolveFromDeepReads(candidates.relative, deepReadPaths);
+    if (deepReadPath) {
+      const stats = deepReadStats.get(deepReadPath);
+      if (stats) return { canonicalPath: deepReadPath, stats };
+    }
+
+    if (!root) return null;
+
+    for (const absCandidate of candidates.absolute) {
+      if (!isWithinRoot(root, absCandidate)) continue;
+      const stats = await readStatsForAbsolutePath(absCandidate);
+      if (stats) {
+        return {
+          canonicalPath: normalizeCitationPath(relative(root, absCandidate)),
+          stats,
+        };
+      }
+    }
+
+    for (const relativeCandidate of candidates.relative) {
+      const absPath = resolve(root, relativeCandidate);
+      if (!isWithinRoot(root, absPath)) continue;
+      const stats = await readStatsForAbsolutePath(absPath);
+      if (stats) {
+        return {
+          canonicalPath: normalizeCitationPath(relative(root, absPath)),
+          stats,
+        };
+      }
+    }
+
+    return null;
+  }
+
+  for (const c of citations) {
+    const citationFile = normalizeCitationPath(c.file);
+    if (!citationFile) {
+      invalid.push({ file: c.file, lines: c.lines, reason: "missing file path" });
+      continue;
+    }
+
+    const range = parseCitationLines(c.lines);
+    if (!range) {
+      invalid.push({ file: citationFile, lines: c.lines, reason: "invalid line range format" });
+      continue;
+    }
+
+    const fileResolution = await getFileStats(citationFile);
+    if (fileResolution === null) {
+      invalid.push({ file: citationFile, lines: c.lines, reason: "file not found in resource" });
+      continue;
+    }
+    const { canonicalPath, stats: fileStats } = fileResolution;
+    if (range.end > fileStats.lineCount) {
+      // Minified bundles often collapse to one logical line, making model line references unstable.
+      // Preserve these citations by coercing to line 1 when we can still prove the file exists.
+      if (fileStats.likelyMinified && fileStats.lineCount <= 2) {
+        valid.push({
+          file: canonicalPath,
+          lines: "1",
+          snippet: c.snippet,
+        });
+        continue;
+      }
+      invalid.push({
+        file: canonicalPath,
+        lines: c.lines,
+        reason: `line range out of bounds (file has ${fileStats.lineCount} lines)`,
+      });
+      continue;
+    }
+
+    valid.push({
+      file: canonicalPath,
+      lines: range.start === range.end ? `${range.start}` : `${range.start}-${range.end}`,
+      snippet: c.snippet,
+    });
+  }
+
+  return { valid, invalid };
+}
+
+function appendNote(existing: string, note: string): string {
+  return existing ? `${existing}\n${note}` : note;
+}
+
+async function buildValidatedOutput(
+  parsed: SynthesisResponse,
+  codeEvidence: EvidenceHit[],
+  deepReads: DeepReadFile[],
+  resourceDir?: string,
+): Promise<NeedleAskOutput> {
+  const citationCheck = await validateCitations(parsed.citations, deepReads, resourceDir);
+  if (citationCheck.valid.length === 0) {
+    const sample = citationCheck.invalid
+      .slice(0, 3)
+      .map((x) => `${x.file}:${x.lines} (${x.reason})`)
+      .join("; ");
+    throw new Error(
+      citationCheck.invalid.length === 0
+        ? "Citation validation failed: no citations provided."
+        : `Citation validation failed: no valid citations. ${sample}`,
+    );
+  }
+
+  let notes = parsed.notes ?? "";
+  let confidence = parsed.confidence;
+
+  if (citationCheck.invalid.length > 0) {
+    confidence = Math.min(confidence, 0.35);
+    notes = appendNote(
+      notes,
+      `Citation validation downgraded confidence: removed ${citationCheck.invalid.length} invalid citation(s).`,
+    );
+    logger.warn("Synthesis citations partially invalid", {
+      kept: citationCheck.valid.length,
+      dropped: citationCheck.invalid.length,
+      examples: citationCheck.invalid.slice(0, 3),
+    });
+  }
+
+  if (confidence < LOW_CONFIDENCE_THRESHOLD) {
+    notes = appendNote(
+      notes,
+      "Low confidence — evidence may be insufficient. Consider refining your question or providing more context.",
+    );
+  }
+
+  return {
+    answer: parsed.answer,
+    code: parsed.code,
+    confidence,
+    citations: citationCheck.valid,
+    evidence: { hits: codeEvidence },
+    nextQueries: parsed.nextQueries,
+    notes,
+  };
+}
+
 // ── Robust JSON pipeline ────────────────────────────────────────────────────
 
 /**
@@ -173,6 +505,7 @@ export async function synthesizeAnswer(
   codeEvidence: EvidenceHit[],
   webEvidence: WebEvidence[],
   deepReads: DeepReadFile[] = [],
+  resourceDir?: string,
 ): Promise<NeedleAskOutput> {
   // Quality gate: check if we have enough code evidence
   // Deep reads count as strong evidence — skip gate if we have them
@@ -200,21 +533,12 @@ export async function synthesizeAnswer(
       lastRaw = rawResponse;
 
       const parsed = parseSynthesisResponse(rawResponse);
-
-      const output: NeedleAskOutput = {
-        answer: parsed.answer,
-        code: parsed.code,
-        confidence: parsed.confidence,
-        citations: parsed.citations,
-        evidence: { hits: codeEvidence },
-        nextQueries: parsed.nextQueries,
-        notes: "",
-      };
-
-      if (output.confidence < LOW_CONFIDENCE_THRESHOLD) {
-        output.notes =
-          "Low confidence — evidence may be insufficient. Consider refining your question or providing more context.";
-      }
+      const output = await buildValidatedOutput(
+        parsed,
+        codeEvidence,
+        deepReads,
+        resourceDir,
+      );
 
       logger.info("Synthesis succeeded", { attempt, confidence: output.confidence });
       return output;
@@ -237,16 +561,25 @@ export async function synthesizeAnswer(
 
   const repaired = await repairWithLlm(lastRaw);
   if (repaired) {
-    logger.info("LLM repair succeeded", { confidence: repaired.confidence });
-    return {
-      answer: repaired.answer,
-      code: repaired.code,
-      confidence: repaired.confidence,
-      citations: repaired.citations,
-      evidence: { hits: codeEvidence },
-      nextQueries: repaired.nextQueries,
-      notes: "Response was repaired by LLM fallback; original output was malformed.",
-    };
+    try {
+      const output = await buildValidatedOutput(
+        repaired,
+        codeEvidence,
+        deepReads,
+        resourceDir,
+      );
+      output.notes = appendNote(
+        output.notes,
+        "Response was repaired by LLM fallback; original output was malformed.",
+      );
+      logger.info("LLM repair succeeded", { confidence: output.confidence });
+      return output;
+    } catch (err) {
+      lastError = err;
+      logger.warn("LLM repair produced invalid citations", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   // Everything failed — safe failure object

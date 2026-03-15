@@ -23,6 +23,15 @@ export interface IterativePipelineOptions {
   evidenceOptions: CollectEvidenceOptions;
   enableIteration?: boolean;
   enableImportFollowing?: boolean;
+  onStep?: (
+    step:
+      | "evidence.reranked"
+      | "deepread.completed"
+      | "imports.followed"
+      | "gaps.identified"
+      | "iteration.pass2.completed",
+    data: Record<string, unknown>,
+  ) => void;
 }
 
 export interface IterativePipelineResult {
@@ -73,7 +82,10 @@ export async function runIterativePipeline(
     evidenceOptions,
     enableIteration = true,
     enableImportFollowing = true,
+    onStep,
   } = options;
+
+  const emitStep = onStep ?? (() => {});
 
   // ── Pass 1: Collect + rerank + deep-read ────────────────────────────────
 
@@ -83,10 +95,19 @@ export async function runIterativePipeline(
   const reranked = await rerankEvidenceWithLite(question, codeEvidence);
   reranked.sort((a, b) => b.score - a.score);
   logger.info("Pass 1: evidence re-ranked", { hits: reranked.length });
+  emitStep("evidence.reranked", { hits: reranked.length });
 
   const pass1Candidates = selectFilesForDeepRead(reranked);
   const pass1DeepReads = await deepReadFiles(dir, pass1Candidates, {
     evidenceHits: reranked,
+  });
+  emitStep("deepread.completed", {
+    filesRead: pass1DeepReads.length,
+    deepReadFiles: pass1DeepReads.map((f) => ({
+      path: f.path,
+      sizeBytes: f.sizeBytes,
+    })),
+    totalBytes: pass1DeepReads.reduce((s, f) => s + f.sizeBytes, 0),
   });
 
   let totalDeepReadBytes = pass1DeepReads.reduce((s, f) => s + f.sizeBytes, 0);
@@ -120,12 +141,32 @@ export async function runIterativePipeline(
           filesRead: importReads.length,
           totalDeepReadBytes,
         });
+        emitStep("imports.followed", {
+          filesRead: importReads.length,
+          totalDeepReadBytes,
+        });
+      } else {
+        emitStep("imports.followed", {
+          filesRead: 0,
+          totalDeepReadBytes,
+        });
       }
     } catch (err) {
       logger.warn("Import following failed, continuing with pass 1 results", {
         error: err instanceof Error ? err.message : String(err),
       });
+      emitStep("imports.followed", {
+        filesRead: 0,
+        totalDeepReadBytes,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
+  } else {
+    emitStep("imports.followed", {
+      filesRead: 0,
+      totalDeepReadBytes,
+      skipped: true,
+    });
   }
 
   // ── Pass 2: Gap analysis + targeted search ──────────────────────────────
@@ -135,6 +176,7 @@ export async function runIterativePipeline(
   if (enableIteration) {
     try {
       const gapQueries = await identifyGapsWithLite(question, reranked, allDeepReads);
+      emitStep("gaps.identified", { count: gapQueries.length, queries: gapQueries });
 
       if (gapQueries.length > 0) {
         const pass2Evidence = await collectEvidence(question, dir, {
@@ -152,6 +194,11 @@ export async function runIterativePipeline(
           searched: gapQueries.length,
           raw: pass2Evidence.length,
           new: newHits.length,
+        });
+        emitStep("iteration.pass2.completed", {
+          searched: gapQueries.length,
+          raw: pass2Evidence.length,
+          newHits: newHits.length,
         });
 
         if (newHits.length > 0) {
@@ -179,12 +226,37 @@ export async function runIterativePipeline(
             });
           }
         }
+      } else {
+        emitStep("iteration.pass2.completed", {
+          searched: 0,
+          raw: 0,
+          newHits: 0,
+        });
       }
     } catch (err) {
       logger.warn("Iterative pass failed, continuing with pass 1 results", {
         error: err instanceof Error ? err.message : String(err),
       });
+      emitStep("gaps.identified", {
+        count: 0,
+        queries: [],
+        error: err instanceof Error ? err.message : String(err),
+      });
+      emitStep("iteration.pass2.completed", {
+        searched: 0,
+        raw: 0,
+        newHits: 0,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
+  } else {
+    emitStep("gaps.identified", { count: 0, queries: [], skipped: true });
+    emitStep("iteration.pass2.completed", {
+      searched: 0,
+      raw: 0,
+      newHits: 0,
+      skipped: true,
+    });
   }
 
   // ── Final filtering ─────────────────────────────────────────────────────

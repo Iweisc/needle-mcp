@@ -10,7 +10,10 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "benchmark": "tsc && node dist/benchmark/run.js",
+    "benchmark:sample": "tsc && node dist/benchmark/run.js --sample",
+    "benchmark:graphs": "tsc && node dist/benchmark/run.js --graphs-only"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
