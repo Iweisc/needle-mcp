@@ -2,3 +2,5 @@ node_modules/
 dist/
 .env
 *.tsbuildinfo
+benchmark-results/*
+!benchmark-results/.gitkeep

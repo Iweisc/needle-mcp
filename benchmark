@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ./benchmark [benchmark args...]
+  ./benchmark sample [benchmark args...]
+  ./benchmark graphs [benchmark args...]
+EOF
+}
+
+build() {
+  npm run build --silent
+}
+
+run_live() {
+  build
+  node dist/benchmark/run.js "$@"
+}
+
+run_sample() {
+  build
+  node dist/benchmark/run.js --sample "$@"
+}
+
+run_graphs() {
+  build
+  node dist/benchmark/run.js --graphs-only "$@"
+}
+
+subcommand="${1-}"
+
+case "$subcommand" in
+  "")
+    run_live
+    ;;
+  sample)
+    shift
+    run_sample "$@"
+    ;;
+  graphs)
+    shift
+    run_graphs "$@"
+    ;;
+  -h|--help|help)
+    usage
+    ;;
+  *)
+    run_live "$@"
+    ;;
+esac

@@ -108,8 +108,120 @@ function countLines(content: string): number {
   return content.split(/\r?\n/).length;
 }
 
+interface FileCitationStats {
+  lineCount: number;
+  likelyMinified: boolean;
+}
+
+function isLikelyMinifiedContent(content: string): boolean {
+  const lines = content.split(/\r?\n/);
+  if (lines.length > 2) return false;
+  const longestLine = lines.reduce((max, line) => Math.max(max, line.length), 0);
+  const punctuationDensity = (content.match(/[{}();,]/g)?.length ?? 0);
+  return longestLine > 320 || (content.length > 600 && punctuationDensity > 50);
+}
+
 function normalizeCitationPath(file: string): string {
-  return file.trim().replace(/\\/g, "/").replace(/^\.\//, "");
+  const trimmed = file.trim().replace(/\\/g, "/");
+  if (!trimmed) return "";
+  const withoutFileScheme = trimmed.replace(/^file:(\/\/)?/i, "");
+  return withoutFileScheme.replace(/^\.\//, "");
+}
+
+function pathBasename(path: string): string {
+  const normalized = path.replace(/\\/g, "/");
+  const idx = normalized.lastIndexOf("/");
+  return idx >= 0 ? normalized.slice(idx + 1) : normalized;
+}
+
+function pathEndsWithSegment(path: string, suffix: string): boolean {
+  const normalizedPath = normalizeCitationPath(path).replace(/^\/+/, "");
+  const normalizedSuffix = normalizeCitationPath(suffix).replace(/^\/+/, "");
+  if (!normalizedPath || !normalizedSuffix) return false;
+  return normalizedPath === normalizedSuffix || normalizedPath.endsWith(`/${normalizedSuffix}`);
+}
+
+function pushUnique(target: string[], seen: Set<string>, value: string): void {
+  if (!value || seen.has(value)) return;
+  seen.add(value);
+  target.push(value);
+}
+
+function collectCitationPathCandidates(
+  file: string,
+  root: string | null,
+): { relative: string[]; absolute: string[] } {
+  const normalized = normalizeCitationPath(file);
+  const relativeCandidates: string[] = [];
+  const absoluteCandidates: string[] = [];
+  const seenRelative = new Set<string>();
+  const seenAbsolute = new Set<string>();
+
+  const addRelative = (value: string): void => {
+    const cleaned = normalizeCitationPath(value).replace(/^\/+/, "");
+    pushUnique(relativeCandidates, seenRelative, cleaned);
+  };
+  const addAbsolute = (value: string): void => {
+    const cleaned = resolve(value);
+    pushUnique(absoluteCandidates, seenAbsolute, cleaned);
+  };
+
+  if (!normalized) {
+    return { relative: relativeCandidates, absolute: absoluteCandidates };
+  }
+
+  if (isAbsolute(normalized)) {
+    addAbsolute(normalized);
+    addRelative(normalized);
+    if (root) {
+      const absPath = resolve(normalized);
+      if (isWithinRoot(root, absPath)) {
+        addRelative(relative(root, absPath));
+      }
+    }
+    return { relative: relativeCandidates, absolute: absoluteCandidates };
+  }
+
+  addRelative(normalized);
+  if (root) {
+    const rootBase = pathBasename(root);
+    if (rootBase && normalized.startsWith(`${rootBase}/`)) {
+      addRelative(normalized.slice(rootBase.length + 1));
+    }
+  }
+
+  return { relative: relativeCandidates, absolute: absoluteCandidates };
+}
+
+function resolveFromDeepReads(
+  candidates: readonly string[],
+  deepReadPaths: readonly string[],
+): string | null {
+  const directMatch = candidates.find((candidate) =>
+    deepReadPaths.includes(candidate)
+  );
+  if (directMatch) return directMatch;
+
+  const suffixMatches = new Set<string>();
+  for (const deepPath of deepReadPaths) {
+    for (const candidate of candidates) {
+      if (pathEndsWithSegment(deepPath, candidate)) {
+        suffixMatches.add(deepPath);
+        break;
+      }
+    }
+  }
+  if (suffixMatches.size === 1) {
+    return [...suffixMatches][0];
+  }
+
+  const basenames = [...new Set(candidates.map(pathBasename).filter(Boolean))];
+  for (const base of basenames) {
+    const matches = deepReadPaths.filter((p) => pathBasename(p) === base);
+    if (matches.length === 1) return matches[0];
+  }
+
+  return null;
 }
 
 function parseCitationLines(lines: string): { start: number; end: number } | null {
@@ -146,70 +258,117 @@ async function validateCitations(
   const valid: NeedleAskOutput["citations"] = [];
   const invalid: CitationIssue[] = [];
 
-  const deepReadLineCounts = new Map<string, number>();
+  const deepReadStats = new Map<string, FileCitationStats>();
   for (const f of deepReads) {
-    deepReadLineCounts.set(normalizeCitationPath(f.path), countLines(f.content));
+    deepReadStats.set(normalizeCitationPath(f.path), {
+      lineCount: countLines(f.content),
+      likelyMinified: isLikelyMinifiedContent(f.content),
+    });
   }
 
-  const fileLineCountCache = new Map<string, number | null>();
+  const fileStatsCache = new Map<string, FileCitationStats | null>();
   const root = resourceDir ? resolve(resourceDir) : null;
+  const deepReadPaths = [...deepReadStats.keys()];
 
-  async function getLineCount(file: string): Promise<number | null> {
-    const normalized = normalizeCitationPath(file);
-    const fromDeepRead = deepReadLineCounts.get(normalized);
-    if (fromDeepRead !== undefined) return fromDeepRead;
-
-    if (!root) return null;
-
-    const absPath = isAbsolute(normalized)
-      ? resolve(normalized)
-      : resolve(root, normalized);
-    if (!isWithinRoot(root, absPath)) return null;
-
-    if (fileLineCountCache.has(absPath)) {
-      return fileLineCountCache.get(absPath) ?? null;
+  async function readStatsForAbsolutePath(
+    absPath: string,
+  ): Promise<FileCitationStats | null> {
+    if (fileStatsCache.has(absPath)) {
+      return fileStatsCache.get(absPath) ?? null;
     }
 
     try {
       const content = await readFile(absPath, "utf-8");
-      const lines = countLines(content);
-      fileLineCountCache.set(absPath, lines);
-      return lines;
+      const stats: FileCitationStats = {
+        lineCount: countLines(content),
+        likelyMinified: isLikelyMinifiedContent(content),
+      };
+      fileStatsCache.set(absPath, stats);
+      return stats;
     } catch {
-      fileLineCountCache.set(absPath, null);
+      fileStatsCache.set(absPath, null);
       return null;
     }
   }
 
+  async function getFileStats(
+    file: string,
+  ): Promise<{ canonicalPath: string; stats: FileCitationStats } | null> {
+    const candidates = collectCitationPathCandidates(file, root);
+    const deepReadPath = resolveFromDeepReads(candidates.relative, deepReadPaths);
+    if (deepReadPath) {
+      const stats = deepReadStats.get(deepReadPath);
+      if (stats) return { canonicalPath: deepReadPath, stats };
+    }
+
+    if (!root) return null;
+
+    for (const absCandidate of candidates.absolute) {
+      if (!isWithinRoot(root, absCandidate)) continue;
+      const stats = await readStatsForAbsolutePath(absCandidate);
+      if (stats) {
+        return {
+          canonicalPath: normalizeCitationPath(relative(root, absCandidate)),
+          stats,
+        };
+      }
+    }
+
+    for (const relativeCandidate of candidates.relative) {
+      const absPath = resolve(root, relativeCandidate);
+      if (!isWithinRoot(root, absPath)) continue;
+      const stats = await readStatsForAbsolutePath(absPath);
+      if (stats) {
+        return {
+          canonicalPath: normalizeCitationPath(relative(root, absPath)),
+          stats,
+        };
+      }
+    }
+
+    return null;
+  }
+
   for (const c of citations) {
-    const file = normalizeCitationPath(c.file);
-    if (!file) {
+    const citationFile = normalizeCitationPath(c.file);
+    if (!citationFile) {
       invalid.push({ file: c.file, lines: c.lines, reason: "missing file path" });
       continue;
     }
 
     const range = parseCitationLines(c.lines);
     if (!range) {
-      invalid.push({ file, lines: c.lines, reason: "invalid line range format" });
+      invalid.push({ file: citationFile, lines: c.lines, reason: "invalid line range format" });
       continue;
     }
 
-    const lineCount = await getLineCount(file);
-    if (lineCount === null) {
-      invalid.push({ file, lines: c.lines, reason: "file not found in resource" });
+    const fileResolution = await getFileStats(citationFile);
+    if (fileResolution === null) {
+      invalid.push({ file: citationFile, lines: c.lines, reason: "file not found in resource" });
       continue;
     }
-    if (range.end > lineCount) {
+    const { canonicalPath, stats: fileStats } = fileResolution;
+    if (range.end > fileStats.lineCount) {
+      // Minified bundles often collapse to one logical line, making model line references unstable.
+      // Preserve these citations by coercing to line 1 when we can still prove the file exists.
+      if (fileStats.likelyMinified && fileStats.lineCount <= 2) {
+        valid.push({
+          file: canonicalPath,
+          lines: "1",
+          snippet: c.snippet,
+        });
+        continue;
+      }
       invalid.push({
-        file,
+        file: canonicalPath,
         lines: c.lines,
-        reason: `line range out of bounds (file has ${lineCount} lines)`,
+        reason: `line range out of bounds (file has ${fileStats.lineCount} lines)`,
       });
       continue;
     }
 
     valid.push({
-      file,
+      file: canonicalPath,
       lines: range.start === range.end ? `${range.start}` : `${range.start}-${range.end}`,
       snippet: c.snippet,
     });

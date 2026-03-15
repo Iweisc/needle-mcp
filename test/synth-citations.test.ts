@@ -131,4 +131,79 @@ describe("synthesizeAnswer citation validation", () => {
       await resource.cleanup();
     }
   });
+
+  it("resolves basename citations to deep-read canonical paths", async () => {
+    const resource = await makeTempResource(
+      "src/index.js",
+      "line1\nline2\nline3\n",
+    );
+
+    try {
+      mockConverse.mockResolvedValueOnce(
+        JSON.stringify({
+          answer: "Uses basename citation.",
+          code: "",
+          confidence: 0.8,
+          citations: [
+            { file: "index.js", lines: "2", snippet: "line2" },
+          ],
+          nextQueries: [],
+          notes: "",
+        }),
+      );
+
+      const result = await synthesizeAnswer(
+        "test question",
+        [],
+        [],
+        resource.deepReads,
+        resource.dir,
+      );
+
+      expect(result.citations).toHaveLength(1);
+      expect(result.citations[0]).toMatchObject({
+        file: "src/index.js",
+        lines: "2",
+      });
+      expect(result.confidence).toBe(0.8);
+    } finally {
+      await resource.cleanup();
+    }
+  });
+
+  it("keeps citations for minified files by coercing out-of-bounds lines to 1", async () => {
+    const minified = "(()=>{const x=1;const y=2;function z(){return x+y;}for(let i=0;i<200;i++){z();}})();".repeat(20);
+    const resource = await makeTempResource("dist/bundle.js", minified);
+
+    try {
+      mockConverse.mockResolvedValueOnce(
+        JSON.stringify({
+          answer: "Cites minified bundle.",
+          code: "",
+          confidence: 0.77,
+          citations: [
+            { file: "bundle.js", lines: "120-140", snippet: "z();" },
+          ],
+          nextQueries: [],
+          notes: "",
+        }),
+      );
+
+      const result = await synthesizeAnswer(
+        "test question",
+        [],
+        [],
+        resource.deepReads,
+        resource.dir,
+      );
+
+      expect(result.citations).toHaveLength(1);
+      expect(result.citations[0]).toMatchObject({
+        file: "dist/bundle.js",
+        lines: "1",
+      });
+    } finally {
+      await resource.cleanup();
+    }
+  });
 });

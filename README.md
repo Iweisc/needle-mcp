@@ -78,6 +78,7 @@ Verifier robustness includes:
 - pnpm
 - [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`) installed and on PATH
 - AWS Bedrock access (Nova Premier model)
+- Codex CLI (`codex`) installed for default baseline benchmarking
 
 ## Quickstart
 
@@ -202,7 +203,87 @@ Local hard-mode example:
 ## Development
 
 ```bash
-pnpm test          # Run unit tests (45 tests)
+pnpm test          # Run unit tests
 pnpm test:watch    # Watch mode
 pnpm build         # Compile TypeScript
 ```
+
+## Benchmarks, Graphs, and Impact
+
+Needle includes a built-in benchmark runner that compares:
+
+- **Needle** (grounded pipeline + citations)
+- **Baseline** (headless `codex exec` answer without source/tool grounding)
+
+The benchmark suite currently uses 8 deterministic local no-doc cases across:
+
+- `quiet-router`
+- `pulse-cache`
+- `framepack`
+- `knot-machine`
+
+Each case is scored against explicit implementation facts. A case is considered **correct** when fact coverage is at least 75% (and for Needle, includes at least one valid citation).
+Expected-time metrics use a conservative 5% correctness floor to avoid divide-by-zero when a baseline has zero fully-correct cases.
+
+### Run Live Benchmark
+
+```bash
+NEEDLE_BEDROCK_BEARER_TOKEN=your-token ./benchmark
+```
+
+Artifacts are generated under `benchmark-results/latest/`:
+
+- `summary.json` (full machine-readable output)
+- `scores.csv` (per-case rows)
+- `report.md` (judge-friendly summary table)
+- `impact.md` (time/cost impact estimate)
+- `graphs/*.svg` (ready-to-embed charts)
+
+Generated charts:
+
+- `graphs/fact-coverage.svg`
+- `graphs/correctness-rate.svg`
+- `graphs/expected-time-to-correct.svg`
+- `graphs/case-fact-coverage.svg`
+- `graphs/time-cut-percent.svg`
+- `graphs/weekly-time-saved.svg`
+- `graphs/hallucination-tax-scenario.svg`
+
+Additional impact tuning env vars:
+
+- `NEEDLE_BENCH_QPW` (default `12`) — questions per engineer per week
+- `NEEDLE_BENCH_TEAM_SIZE` (default `6`) — team size for impact model
+- `NEEDLE_BENCH_COST_PER_HOUR` (default `90`) — loaded engineering cost/hour (USD)
+- `NEEDLE_BENCH_AI_HOURS_PER_DEV_WEEK` (default `20`) — modeled AI-assisted coding hours for hallucination-tax scenario
+- `NEEDLE_BENCH_BASELINE_PROVIDER` (default `codex`) — `codex` or `bedrock`
+- `NEEDLE_BENCH_CODEX_MODEL` (default `gpt-5.4`) — model passed to `codex exec`
+- `NEEDLE_BENCH_CODEX_TIMEOUT_MS` (default `180000`) — per-case timeout for `codex exec`
+
+If you switch baseline provider to Bedrock (`NEEDLE_BENCH_BASELINE_PROVIDER=bedrock`), baseline uses Nova Premier.
+
+### Generate Sample Graphs (No Bedrock Token)
+
+```bash
+./benchmark sample
+```
+
+This writes synthetic sample outputs with the same schema/layout, useful for CI wiring and slide design before running the real benchmark.
+
+### Rebuild Graphs From Existing Results
+
+```bash
+./benchmark graphs
+```
+
+Optional:
+
+```bash
+./benchmark graphs --input benchmark-results/latest/summary.json --output benchmark-results/latest
+```
+
+## Hackathon Submission Playbook
+
+Judge-facing demo flow, rubric mapping, Nova-first framing, and before/after narrative template:
+
+- [`docs/hackathon-playbook.md`](docs/hackathon-playbook.md)
+- [`docs/impact-evidence.md`](docs/impact-evidence.md)
